@@ -4,7 +4,19 @@ import open3d as o3d
 import numpy as np
 from plyfile import PlyData, PlyElement
 import trimesh
+from scipy.spatial import KDTree
 # import pyassimp
+
+def load_valid_texture(mesh):
+    # 遍历所有纹理，返回第一个有效纹理
+    for texture in mesh.textures:
+        if texture.is_empty():
+            continue
+        texture_image = np.asarray(texture)
+        if texture_image.size > 0:
+            return texture_image
+    # 如果没有有效纹理，返回 None
+    return None
 
 # def assimp_model_to_o3d_mesh(model_file_path):
 #     # 使用 pyassimp 加载模型
@@ -31,25 +43,6 @@ import trimesh
     
 #     return o3d_mesh
 
-def model_to_o3d_mesh(model_file_path):
-    loaded_mesh = trimesh.load(model_file_path)
-    
-    if isinstance(loaded_mesh, trimesh.Scene):
-        # 如果加载的是一个场景，提取所有几何对象并合并
-        meshes = [loaded_mesh.geometry[geom] for geom in loaded_mesh.geometry]
-        combined_mesh = trimesh.util.concatenate(meshes)
-    else:
-        combined_mesh = loaded_mesh
-
-    if not combined_mesh.vertices.size or not combined_mesh.faces.size:
-        raise ValueError(f"{model_file_path} has no vertices or faces")
-    
-    o3d_mesh = o3d.geometry.TriangleMesh()
-    o3d_mesh.vertices = o3d.utility.Vector3dVector(combined_mesh.vertices)
-    o3d_mesh.triangles = o3d.utility.Vector3iVector(combined_mesh.faces)
-    
-    return o3d_mesh
-
 def mesh_to_ply(mesh, ply_file_path, number_of_points=None, scale_factor=20):
     number_of_points = number_of_points or (scale_factor * scale_factor * scale_factor)  # 最大点默认为正方体体积
 
@@ -61,7 +54,72 @@ def mesh_to_ply(mesh, ply_file_path, number_of_points=None, scale_factor=20):
 
     # 获取点云数据
     points = np.asarray(pcd.points)
-    
+
+    texture_image = load_valid_texture(mesh)
+    # 添加颜色信息（如果模型本身带有颜色）
+    if mesh.has_vertex_colors():
+        colors = mesh.vertex_colors
+    elif texture_image is not None:
+        # 获取网格顶点和三角面
+        vertices = np.asarray(mesh.vertices)
+        triangles = np.asarray(mesh.triangles)
+        triangle_uvs = np.asarray(mesh.triangle_uvs).reshape(-1, 3, 2)
+
+        # 创建KDTree以加速最近邻搜索
+        kdtree = KDTree(vertices)
+        
+        # 获取采样点的颜色
+        colors = []
+        for point in pcd.points:
+            _, idx = kdtree.query(point)
+            nearest_triangle = triangles[idx // 3]
+
+            # 获取三角面顶点的UV坐标
+            uv_coords = triangle_uvs[idx // 3]
+
+            # 计算采样点的UV坐标（使用重心插值）
+            v0, v1, v2 = vertices[nearest_triangle]
+            uv0, uv1, uv2 = uv_coords
+
+            # 使用最小二乘法计算重心坐标
+            A = np.array([v0 - v2, v1 - v2]).T
+            b = point - v2
+            weight, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+            weight = np.append(weight, 1 - weight.sum())
+            uv = weight[0] * uv0 + weight[1] * uv1 + weight[2] * uv2
+            
+            # 确保UV坐标在[0,1]范围内
+            uv = np.clip(weight[0] * uv0 + weight[1] * uv1 + weight[2] * uv2, 0, 1)
+
+            # 将UV转换为纹理图像中的像素坐标
+            u, v = uv
+            x = int(u * (texture_image.shape[1] - 1))
+            y = int((1 - v) * (texture_image.shape[0] - 1))  # 翻转V坐标
+            color = texture_image[y, x, :3] / 255.0  # 归一化到[0, 1]
+            colors.append(color)
+
+        # 确保颜色数组与点云点数量匹配
+        if len(colors) > len(pcd.points):
+            colors = colors[:len(pcd.points)]
+        elif len(colors) < len(pcd.points):
+            extended_size = len(pcd.points) - len(colors)
+            # 扩展颜色数组
+            extended_colors = []
+            while len(extended_colors) < extended_size:
+                extended_colors.extend(colors)
+            colors.extend(extended_colors)
+            # 确保颜色数组长度与点云点数量一致
+            colors = colors[:len(pcd.points)]
+            
+        # 将颜色转换为 numpy 数组
+        colors = np.array(colors)
+    else:
+        # 如果没有纹理，生成全为1的颜色
+        colors = np.ones((len(pcd.points), 3))
+
+    # 将颜色值从 [0, 1] 转换为 [0, 255]
+    colors = (colors * 255).astype(np.uint8)
+
     # 归一化点云数据到 [0, 1] 范围
     min_vals = points.min(axis=0)
     max_vals = points.max(axis=0)
@@ -74,10 +132,21 @@ def mesh_to_ply(mesh, ply_file_path, number_of_points=None, scale_factor=20):
     # 去除重复点
     unique_scaled_points = np.unique(scaled_points, axis=0)
 
+    # 获取唯一点对应的索引
+    _, unique_indices = np.unique(scaled_points, axis=0, return_index=True)
+    unique_colors = colors[unique_indices]
+
     # 创建PLY元素
     vertex_element = np.array(
-        [(x, z, y) for x, y, z in unique_scaled_points],
-        dtype=[('x', 'i4'), ('y', 'i4'), ('z', 'i4')]
+        [(x, z, y, r, g, b) for (x, y, z), (r, g, b) in zip(unique_scaled_points, unique_colors)],
+        dtype=[
+            ('x', 'i4'),
+            ('y', 'i4'),
+            ('z', 'i4'),
+            ('red', 'u1'),
+            ('green', 'u1'),
+            ('blue', 'u1')
+        ]
     )
 
     # 创建PLY数据
@@ -89,6 +158,11 @@ def mesh_to_ply(mesh, ply_file_path, number_of_points=None, scale_factor=20):
     # 写入PLY文件
     # o3d.io.write_point_cloud(ply_file_path, pcd, write_ascii=True)
 
+def model_to_o3d_mesh(model_file_path):
+    mesh = o3d.io.read_triangle_mesh(model_file_path)
+    mesh.compute_vertex_normals()
+
+    return mesh
 
 def get_model_files(directory):
     model_files = []
@@ -110,7 +184,6 @@ def convert_models(models_dir, output_dir = None):
         try:
             if model.lower().endswith('.glb'):
                 mesh = model_to_o3d_mesh(model)
-                # mesh = o3d.io.read_triangle_mesh(model)
             # elif model.lower().endswith('.fbx'):
                 # mesh = assimp_model_to_o3d_mesh(model)
             else:
@@ -143,7 +216,7 @@ if __name__ == '__main__':
 # pip install numpy
 # pip install open3d
 # pip install plyfile
-# pip install trimesh  直接奔溃
+# pip install trimesh  直接奔溃 pip install trimesh[easy] 或 pip install trimesh[all]
 # pip install pygltflib
 # pip install pyassimp 不好使, 需要安装 assimp  ubuntu 可以使用 apt install libassimp-dev 安装
 
