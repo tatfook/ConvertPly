@@ -211,7 +211,7 @@ if __name__ == '__main__':
     # 调用一下函数 传入要转换的模型文件夹路径
     # convert_models('/mnt/d/workspace/program/ParacraftDev/worlds/DesignHouse/_user/wxatest/bmax/blocktemplates')
     # convert_models('D:/workspace/program/ParacraftDev/worlds/DesignHouse/_user/wxatest/bmax/blocktemplates')
-    convert_models('D:/workspace/npl/ConvertPly/models')
+    convert_models('D:/workspace/npl/ConvertPly/models/outputs')
 
 
 # 使用示例

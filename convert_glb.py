@@ -42,7 +42,7 @@ def has_valid_texture(mesh):
 def assign_material_colors_to_vertices(mesh, material_colors):
     """Assign material colors to vertices based on their associated materials."""
     if not hasattr(mesh.visual, 'material') or has_valid_texture(mesh):
-        return
+        return False
     
     vertex_colors = np.ones((len(mesh.vertices), 3), dtype=np.float32)
     
@@ -60,6 +60,7 @@ def assign_material_colors_to_vertices(mesh, material_colors):
             vertex_colors[:] = material_color
     
     mesh.visual.vertex_colors = (vertex_colors * 255).astype(np.uint8)
+    return True
 
 def save_mesh_as_glb(meshes, output_file_path):
     """Save the modified meshes as a new GLB file using trimesh."""
