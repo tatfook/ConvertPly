@@ -7,6 +7,8 @@ import trimesh
 from scipy.spatial import KDTree
 # import pyassimp
 
+import utils
+
 def load_valid_texture(mesh):
     # 遍历所有纹理，返回第一个有效纹理
     for texture in mesh.textures:
@@ -55,10 +57,25 @@ def mesh_to_ply(mesh, ply_file_path, number_of_points=None, scale_factor=20):
     # 获取点云数据
     points = np.asarray(pcd.points)
 
+    # TODO 应该根据三角形的材质ID来获取对象的纹理数据 triangle_material_ids
     texture_image = load_valid_texture(mesh)
     # 添加颜色信息（如果模型本身带有颜色）
     if mesh.has_vertex_colors():
-        colors = mesh.vertex_colors
+        vertices = np.asarray(mesh.vertices)
+        vertex_colors = np.asarray(mesh.vertex_colors)[:, :3]  # 取前三通道作为RGB
+
+        # 创建KDTree以加速最近邻搜索
+        kdtree = KDTree(vertices)
+        
+        # 获取采样点的颜色
+        colors = []
+        for point in pcd.points:
+            dist, idx = kdtree.query(point)
+            color = vertex_colors[idx]
+            colors.append(color)
+
+        # 将颜色转换为 numpy 数组
+        colors = np.array(colors)
     elif texture_image is not None:
         # 获取网格顶点和三角面
         vertices = np.asarray(mesh.vertices)
@@ -164,19 +181,9 @@ def model_to_o3d_mesh(model_file_path):
 
     return mesh
 
-def get_model_files(directory):
-    model_files = []
-    for root, dirs, files in os.walk(directory):
-        for file in files:
-            if file.lower().endswith('.glb') or file.lower().endswith('.fbx'):
-                model_files.append(os.path.join(root, file))
-
-    return model_files
-
-
 def convert_models(models_dir, output_dir = None):
     output_dir = output_dir or models_dir
-    models = get_model_files(models_dir)
+    models = utils.get_model_files(models_dir)
     for model in models:
         base_name = os.path.splitext(os.path.basename(model))[0]
         output_file = os.path.join(output_dir, base_name + '.ply')
